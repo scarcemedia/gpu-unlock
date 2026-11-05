@@ -96,6 +96,7 @@ jobs:
           for file in build/rpm/RPMS/noarch/*.rpm; do
             curl --fail-with-body --silent --show-error \
               --user "$NEXUS_USERNAME:$NEXUS_PASSWORD" \
+              --form-string "yum.directory=noarch" \
               --form "yum.asset=@$file" \
               --form-string "yum.asset.filename=${file##*/}" \
               --write-out "${file##*/}: HTTP %{http_code}\n" \
