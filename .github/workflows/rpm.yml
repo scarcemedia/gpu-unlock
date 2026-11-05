@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       publish:
-        description: Upload signed RPMs and the public key to Nexus
+        description: Upload signed RPMs to Nexus
         type: boolean
         default: false
 
@@ -91,10 +91,13 @@ jobs:
         env:
           NEXUS_USERNAME: ${{ secrets.NEXUS_USERNAME }}
           NEXUS_PASSWORD: ${{ secrets.NEXUS_PASSWORD }}
-          NEXUS_URL: https://nexus.custenborder.com/repository/gpu-unlock
+          NEXUS_URL: https://nexus.custenborder.com/service/rest/v1/components?repository=gpu-unlock
         run: |
-          for file in build/rpm/RPMS/noarch/*.rpm packaging/rpm/RPM-GPG-KEY-scarcemedia; do
+          for file in build/rpm/RPMS/noarch/*.rpm; do
             curl --fail-with-body --silent --show-error \
               --user "$NEXUS_USERNAME:$NEXUS_PASSWORD" \
-              --upload-file "$file" "$NEXUS_URL/${file##*/}"
+              --form "yum.asset=@$file" \
+              --form-string "yum.asset.filename=${file##*/}" \
+              --write-out "${file##*/}: HTTP %{http_code}\n" \
+              "$NEXUS_URL"
           done
