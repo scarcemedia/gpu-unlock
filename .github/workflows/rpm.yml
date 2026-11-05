@@ -22,6 +22,8 @@ jobs:
       group: gpu-unlock
       labels: [self-hosted, Linux, X64]
     timeout-minutes: 45
+    env:
+      KERNEL_VERSION: 5.14.0-687.65.1.el9_8.x86_64
     defaults:
       run:
         shell: bash
@@ -39,19 +41,37 @@ jobs:
           test -n "$NEXUS_USERNAME" || { echo 'Missing NEXUS_USERNAME secret'; exit 1; }
           test -n "$NEXUS_PASSWORD" || { echo 'Missing NEXUS_PASSWORD secret'; exit 1; }
 
-      - name: Compile module against the running Rocky kernel
+      - name: Check the target Rocky kernel
         run: |
           source /etc/os-release
           test "$ID" = rocky
           test "${VERSION_ID%%.*}" = 9
-          uname -r
-          rpm -q "kernel-devel-$(uname -r)"
-          make -C kernel/gpu_unlock KDIR="/lib/modules/$(uname -r)/build"
+          test "$(uname -r)" = "$KERNEL_VERSION"
+          rpm -q "kernel-devel-$KERNEL_VERSION"
 
       - name: Build RPMs
         run: |
           sed -i "s/^Release:.*/Release: 1.scarcemedia.${GITHUB_RUN_NUMBER}%{?dist}/" packaging/rpm/gpu-unlock.spec
           make rpm
+
+      - name: Verify the packaged precompiled module
+        run: |
+          module_rpm=(build/rpm/RPMS/x86_64/gpu-unlock-kmod-*.rpm)
+          test "${#module_rpm[@]}" -eq 1
+          test -f "${module_rpm[0]}"
+          test "$(rpm -qp --queryformat '%{ARCH}' "${module_rpm[0]}")" = x86_64
+          requirements=$(rpm -qp --requires "${module_rpm[0]}")
+          grep -Fx "kernel-uname-r = $KERNEL_VERSION" <<< "$requirements"
+          if grep -Eq '^(dkms|gcc|make|kernel-devel)( |$)' <<< "$requirements"; then
+            echo 'The precompiled module must not require build tools on the target host'
+            exit 1
+          fi
+          extract=$(mktemp -d "$RUNNER_TEMP/gpu-unlock-module.XXXXXX")
+          trap 'rm -rf -- "$extract"' EXIT
+          rpm2cpio "${module_rpm[0]}" | cpio --extract --make-directories --quiet --directory "$extract"
+          module="$extract/usr/lib/modules/$KERNEL_VERSION/extra/gpu-unlock/gpu_unlock.ko"
+          vermagic=$(modinfo -F vermagic "$module")
+          test "${vermagic%% *}" = "$KERNEL_VERSION"
 
       - name: Sign and verify RPMs
         env:
@@ -71,11 +91,11 @@ jobs:
           gpg --batch --list-secret-keys "$fingerprint"
           rpmsign --define "_gpg_name $fingerprint" \
             --define "_gpg_sign_cmd_extra_args --batch --pinentry-mode loopback --passphrase-file $GNUPGHOME/passphrase" \
-            --addsign build/rpm/RPMS/noarch/*.rpm
+            --addsign build/rpm/RPMS/*/*.rpm
           rpm --dbpath "$GNUPGHOME/rpmdb" --initdb
           rpm --dbpath "$GNUPGHOME/rpmdb" --import packaging/rpm/RPM-GPG-KEY-scarcemedia
-          rpm --dbpath "$GNUPGHOME/rpmdb" --checksig build/rpm/RPMS/noarch/*.rpm
-          rpm -qp --queryformat '%{NAME} %{VERSION}-%{RELEASE} %{ARCH}\n' build/rpm/RPMS/noarch/*.rpm
+          rpm --dbpath "$GNUPGHOME/rpmdb" --checksig build/rpm/RPMS/*/*.rpm
+          rpm --dbpath "$GNUPGHOME/rpmdb" -qp --queryformat '%{NAME} %{VERSION}-%{RELEASE} %{ARCH}\n' build/rpm/RPMS/*/*.rpm
 
       - name: Save signed RPMs and public key
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -83,7 +103,7 @@ jobs:
           name: gpu-unlock-rpms-${{ github.run_number }}
           if-no-files-found: error
           path: |
-            build/rpm/RPMS/noarch/*.rpm
+            build/rpm/RPMS/*/*.rpm
             packaging/rpm/RPM-GPG-KEY-scarcemedia
 
       - name: Publish to Nexus
@@ -93,10 +113,11 @@ jobs:
           NEXUS_PASSWORD: ${{ secrets.NEXUS_PASSWORD }}
           NEXUS_URL: https://nexus.custenborder.com/service/rest/v1/components?repository=gpu-unlock
         run: |
-          for file in build/rpm/RPMS/noarch/*.rpm; do
+          for file in build/rpm/RPMS/*/*.rpm; do
+            directory=$(basename "$(dirname "$file")")
             curl --fail-with-body --silent --show-error \
               --user "$NEXUS_USERNAME:$NEXUS_PASSWORD" \
-              --form-string "yum.directory=noarch" \
+              --form-string "yum.directory=$directory" \
               --form "yum.asset=@$file" \
               --form-string "yum.asset.filename=${file##*/}" \
               --write-out "${file##*/}: HTTP %{http_code}\n" \

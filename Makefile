@@ -141,7 +141,7 @@ install-rpm:
 	sudo dnf install -y rpm-build
 	sudo dnf builddep -y packaging/rpm/gpu-unlock.spec
 	$(MAKE) rpm
-	sudo dnf install -y $(RPMDIR)/RPMS/noarch/gpu-unlock-*-$(VERSION)-*.noarch.rpm
+	sudo dnf install -y $(RPMDIR)/RPMS/*/gpu-unlock-*-$(VERSION)-*.rpm
 
 # Build the module, or build, install and remove the packages, in a
 # container of each distribution.
