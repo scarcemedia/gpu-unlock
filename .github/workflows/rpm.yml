@@ -1,0 +1,100 @@
+name: Rocky RPMs
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Upload signed RPMs and the public key to Nexus
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rocky-rpm-publish
+  cancel-in-progress: false
+
+jobs:
+  rpm:
+    if: github.repository == 'scarcemedia/gpu-unlock' && github.ref == 'refs/heads/main'
+    runs-on:
+      group: gpu-unlock
+      labels: [self-hosted, Linux, X64]
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Check Nexus credentials
+        if: inputs.publish
+        env:
+          NEXUS_USERNAME: ${{ secrets.NEXUS_USERNAME }}
+          NEXUS_PASSWORD: ${{ secrets.NEXUS_PASSWORD }}
+        run: |
+          test -n "$NEXUS_USERNAME" || { echo 'Missing NEXUS_USERNAME secret'; exit 1; }
+          test -n "$NEXUS_PASSWORD" || { echo 'Missing NEXUS_PASSWORD secret'; exit 1; }
+
+      - name: Compile module against the running Rocky kernel
+        run: |
+          source /etc/os-release
+          test "$ID" = rocky
+          test "${VERSION_ID%%.*}" = 9
+          uname -r
+          rpm -q "kernel-devel-$(uname -r)"
+          make -C kernel/gpu_unlock KDIR="/lib/modules/$(uname -r)/build"
+
+      - name: Build RPMs
+        run: |
+          sed -i "s/^Release:.*/Release: 1.scarcemedia.${GITHUB_RUN_NUMBER}%{?dist}/" packaging/rpm/gpu-unlock.spec
+          make rpm
+
+      - name: Sign and verify RPMs
+        env:
+          RPM_GPG_PRIVATE_KEY: ${{ secrets.RPM_GPG_PRIVATE_KEY }}
+          RPM_GPG_PASSPHRASE: ${{ secrets.RPM_GPG_PASSPHRASE }}
+        run: |
+          test -n "$RPM_GPG_PRIVATE_KEY" || { echo 'Missing RPM_GPG_PRIVATE_KEY secret'; exit 1; }
+          test -n "$RPM_GPG_PASSPHRASE" || { echo 'Missing RPM_GPG_PASSPHRASE secret'; exit 1; }
+          GNUPGHOME=$(mktemp -d "$RUNNER_TEMP/gpu-unlock-gnupg.XXXXXX")
+          export GNUPGHOME
+          trap 'gpgconf --kill gpg-agent; rm -rf -- "$GNUPGHOME"' EXIT
+          printf '%s' "$RPM_GPG_PRIVATE_KEY" | gpg --batch --import
+          printf '%s' "$RPM_GPG_PASSPHRASE" > "$GNUPGHOME/passphrase"
+          chmod 600 "$GNUPGHOME/passphrase"
+          fingerprint=$(gpg --show-keys --with-colons packaging/rpm/RPM-GPG-KEY-scarcemedia | awk -F: '$1 == "fpr" {print $10; exit}')
+          test -n "$fingerprint"
+          gpg --batch --list-secret-keys "$fingerprint"
+          rpmsign --define "_gpg_name $fingerprint" \
+            --define "_gpg_sign_cmd_extra_args --batch --pinentry-mode loopback --passphrase-file $GNUPGHOME/passphrase" \
+            --addsign build/rpm/RPMS/noarch/*.rpm
+          rpm --dbpath "$GNUPGHOME/rpmdb" --initdb
+          rpm --dbpath "$GNUPGHOME/rpmdb" --import packaging/rpm/RPM-GPG-KEY-scarcemedia
+          rpm --dbpath "$GNUPGHOME/rpmdb" --checksig build/rpm/RPMS/noarch/*.rpm
+          rpm -qp --queryformat '%{NAME} %{VERSION}-%{RELEASE} %{ARCH}\n' build/rpm/RPMS/noarch/*.rpm
+
+      - name: Save signed RPMs and public key
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: gpu-unlock-rpms-${{ github.run_number }}
+          if-no-files-found: error
+          path: |
+            build/rpm/RPMS/noarch/*.rpm
+            packaging/rpm/RPM-GPG-KEY-scarcemedia
+
+      - name: Publish to Nexus
+        if: inputs.publish
+        env:
+          NEXUS_USERNAME: ${{ secrets.NEXUS_USERNAME }}
+          NEXUS_PASSWORD: ${{ secrets.NEXUS_PASSWORD }}
+          NEXUS_URL: https://nexus.custenborder.com/repository/gpu-unlock
+        run: |
+          for file in build/rpm/RPMS/noarch/*.rpm packaging/rpm/RPM-GPG-KEY-scarcemedia; do
+            curl --fail-with-body --silent --show-error \
+              --user "$NEXUS_USERNAME:$NEXUS_PASSWORD" \
+              --upload-file "$file" "$NEXUS_URL/${file##*/}"
+          done
