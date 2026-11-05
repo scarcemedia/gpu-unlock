@@ -5,9 +5,10 @@
  * FLR so the stock driver starts from a clean, halted GSP. After resume from
  * suspend it runs again on the card nvidia has suspended, before nvidia resumes it.
  */
-#include <linux/version.h>
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
+/* Rocky/RHEL backports aperture helpers into its 5.14 kernel. */
+#if __has_include(<linux/aperture.h>)
 #include <linux/aperture.h>
+#define GU_HAS_APERTURE_HELPER
 #else
 #include <linux/fb.h>
 #endif
@@ -1494,10 +1495,10 @@ static int unlock_transaction_reset(struct unlock_transaction_work *work)
 	 * does nothing on a card without one. After resume nvidia-drm already has.
 	 */
 	if (!work->resume) {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
+#ifdef GU_HAS_APERTURE_HELPER
 		ret = aperture_remove_conflicting_pci_devices(work->pdev, "gpu_unlock");
 #else
-		/* Before 6.0 the fbdev helper does the same. */
+		/* Older kernels without aperture helpers use fbdev. */
 		ret = remove_conflicting_pci_framebuffers(work->pdev, "gpu_unlock");
 #endif
 		if (ret)
